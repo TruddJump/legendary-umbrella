@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""睡觉看视频定时关机/休眠小工具。
-
-功能：
-1. 主界面选择目标小时（24 小时制）以及到点后的动作（休眠/关机）。
-2. 点击“设定”后，提示设定成功，并把主界面最小化到任务栏。
-3. 到目标时间前 30 秒，主界面自动弹出提醒。
-4. 用户若在这 30 秒内重新设定，则更新下一次执行时间。
-5. 用户若无响应，到点后自动执行休眠或关机。
-6. 每次打开或重新设定时，默认时间为“当前时间 + 1 小时”的整点。
-"""
+"""睡觉看视频定时关机/休眠小工具。"""
 
 from __future__ import annotations
 
@@ -23,24 +14,22 @@ class SleepTimerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("睡觉看视频定时助手")
-        self.root.geometry("380x220")
+        self.root.geometry("420x250")
         self.root.resizable(False, False)
 
         self.target_time: dt.datetime | None = None
         self.warn_opened = False
 
         self.hour_var = tk.StringVar()
+        self.minute_var = tk.StringVar()
         self.action_var = tk.StringVar(value="休眠")
         self.status_var = tk.StringVar(value="请先选择时间和动作，然后点击【设定】。")
         self.countdown_var = tk.StringVar(value="")
 
         self._build_ui()
-        self._set_default_hour()
+        self._set_default_time()
 
-        # 统一用 after 做调度检查
         self._tick()
-
-        # 点击窗口关闭按钮时，改为最小化到任务栏
         self.root.protocol("WM_DELETE_WINDOW", self._minimize_to_taskbar)
 
     def _build_ui(self) -> None:
@@ -48,14 +37,24 @@ class SleepTimerApp:
         wrapper.pack(fill="both", expand=True)
 
         ttk.Label(wrapper, text="目标时间（24小时制）").grid(row=0, column=0, sticky="w")
+
         hour_combo = ttk.Combobox(
             wrapper,
             textvariable=self.hour_var,
-            values=[f"{h:02d}:00" for h in range(24)],
-            state="readonly",
-            width=10,
+            values=[f"{h:02d}" for h in range(24)],
+            width=8,
         )
         hour_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        ttk.Label(wrapper, text=":").grid(row=0, column=2, sticky="w", padx=(6, 6))
+
+        minute_combo = ttk.Combobox(
+            wrapper,
+            textvariable=self.minute_var,
+            values=[f"{m:02d}" for m in range(60)],
+            width=8,
+        )
+        minute_combo.grid(row=0, column=3, sticky="w")
 
         ttk.Label(wrapper, text="到点动作").grid(row=1, column=0, sticky="w", pady=(12, 0))
         action_combo = ttk.Combobox(
@@ -65,36 +64,53 @@ class SleepTimerApp:
             state="readonly",
             width=10,
         )
-        action_combo.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(12, 0))
+        action_combo.grid(row=1, column=1, columnspan=3, sticky="w", padx=(10, 0), pady=(12, 0))
 
         set_btn = ttk.Button(wrapper, text="设定", command=self._on_set_clicked)
-        set_btn.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        set_btn.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(16, 0))
 
-        status = ttk.Label(wrapper, textvariable=self.status_var, wraplength=340)
-        status.grid(row=3, column=0, columnspan=2, sticky="w", pady=(14, 0))
+        status = ttk.Label(wrapper, textvariable=self.status_var, wraplength=380)
+        status.grid(row=3, column=0, columnspan=4, sticky="w", pady=(14, 0))
 
         countdown = ttk.Label(wrapper, textvariable=self.countdown_var, foreground="#b45309")
-        countdown.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        countdown.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-    def _set_default_hour(self) -> None:
+    def _set_default_time(self) -> None:
         one_hour_later = dt.datetime.now() + dt.timedelta(hours=1)
-        self.hour_var.set(f"{one_hour_later.hour:02d}:00")
+        self.hour_var.set(f"{one_hour_later.hour:02d}")
+        self.minute_var.set(f"{one_hour_later.minute:02d}")
 
-    def _next_target_datetime(self, hour: int) -> dt.datetime:
+    @staticmethod
+    def _parse_time_value(raw: str, limit: int, field_name: str) -> int | None:
+        value_text = raw.strip()
+        if not value_text.isdigit():
+            messagebox.showwarning("输入有误", f"{field_name}请输入 0-{limit} 的数字。")
+            return None
+
+        value = int(value_text)
+        if not 0 <= value <= limit:
+            messagebox.showwarning("输入有误", f"{field_name}超出范围，请输入 0-{limit}。")
+            return None
+
+        return value
+
+    def _next_target_datetime(self, hour: int, minute: int) -> dt.datetime:
         now = dt.datetime.now()
-        candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if candidate <= now:
             candidate += dt.timedelta(days=1)
         return candidate
 
     def _on_set_clicked(self) -> None:
-        hour_text = self.hour_var.get().strip()
-        if not hour_text:
-            messagebox.showwarning("提示", "请先选择目标时间。")
+        hour = self._parse_time_value(self.hour_var.get(), 23, "小时")
+        minute = self._parse_time_value(self.minute_var.get(), 59, "分钟")
+        if hour is None or minute is None:
             return
 
-        hour = int(hour_text.split(":", maxsplit=1)[0])
-        self.target_time = self._next_target_datetime(hour)
+        self.hour_var.set(f"{hour:02d}")
+        self.minute_var.set(f"{minute:02d}")
+
+        self.target_time = self._next_target_datetime(hour, minute)
         self.warn_opened = False
 
         self.status_var.set(
@@ -103,8 +119,7 @@ class SleepTimerApp:
         self.countdown_var.set("")
         messagebox.showinfo("设定成功", "已为你保存设定，窗口将最小化到任务栏。")
 
-        # 每次设定后，下一次默认值仍然保持“当前时间 +1 小时”
-        self._set_default_hour()
+        self._set_default_time()
         self._minimize_to_taskbar()
 
     def _open_warning_window(self) -> None:
@@ -132,7 +147,7 @@ class SleepTimerApp:
                     subprocess.run(["osascript", "-e", 'tell app "System Events" to shut down'], check=False)
                 else:
                     subprocess.run(["shutdown", "-h", "now"], check=False)
-            else:  # 休眠
+            else:
                 if system == "windows":
                     subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"], check=False)
                 elif system == "darwin":
@@ -167,7 +182,6 @@ class SleepTimerApp:
 def main() -> None:
     root = tk.Tk()
     app = SleepTimerApp(root)
-    # 避免“未使用变量”提示，并让对象生命周期和 root 一致
     root.app = app  # type: ignore[attr-defined]
     root.mainloop()
 
