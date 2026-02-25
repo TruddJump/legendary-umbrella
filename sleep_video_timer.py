@@ -4,17 +4,30 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import platform
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+PYSTRAY_AVAILABLE = importlib.util.find_spec("pystray") is not None
+PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
+
+if PYSTRAY_AVAILABLE and PIL_AVAILABLE:
+    import pystray
+    from PIL import Image, ImageDraw
+else:
+    pystray = None
+    Image = None
+    ImageDraw = None
 
 
 class SleepTimerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("睡觉看视频定时助手")
-        self.root.geometry("420x250")
+        self.root.geometry("440x290")
         self.root.resizable(False, False)
 
         self.target_time: dt.datetime | None = None
@@ -26,11 +39,15 @@ class SleepTimerApp:
         self.status_var = tk.StringVar(value="请先选择时间和动作，然后点击【设定】。")
         self.countdown_var = tk.StringVar(value="")
 
+        self.tray_icon = None
+        self.tray_thread: threading.Thread | None = None
+        self.tray_active = False
+
         self._build_ui()
         self._set_default_time()
 
         self._tick()
-        self.root.protocol("WM_DELETE_WINDOW", self._minimize_to_taskbar)
+        self.root.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
 
     def _build_ui(self) -> None:
         wrapper = ttk.Frame(self.root, padding=14)
@@ -66,14 +83,25 @@ class SleepTimerApp:
         )
         action_combo.grid(row=1, column=1, columnspan=3, sticky="w", padx=(10, 0), pady=(12, 0))
 
-        set_btn = ttk.Button(wrapper, text="设定", command=self._on_set_clicked)
-        set_btn.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(16, 0))
+        btn_row = ttk.Frame(wrapper)
+        btn_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(16, 0))
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
 
-        status = ttk.Label(wrapper, textvariable=self.status_var, wraplength=380)
+        set_btn = ttk.Button(btn_row, text="设定", command=self._on_set_clicked)
+        set_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        cancel_btn = ttk.Button(btn_row, text="终止定时", command=self._stop_timer)
+        cancel_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        status = ttk.Label(wrapper, textvariable=self.status_var, wraplength=400)
         status.grid(row=3, column=0, columnspan=4, sticky="w", pady=(14, 0))
 
         countdown = ttk.Label(wrapper, textvariable=self.countdown_var, foreground="#b45309")
         countdown.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        tip = ttk.Label(wrapper, text="关闭窗口或设定成功后会最小化到托盘。", foreground="#6b7280")
+        tip.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _set_default_time(self) -> None:
         one_hour_later = dt.datetime.now() + dt.timedelta(hours=1)
@@ -117,21 +145,78 @@ class SleepTimerApp:
             f"设定成功：{self.target_time.strftime('%Y-%m-%d %H:%M')} 执行【{self.action_var.get()}】。"
         )
         self.countdown_var.set("")
-        messagebox.showinfo("设定成功", "已为你保存设定，窗口将最小化到任务栏。")
+        messagebox.showinfo("设定成功", "已为你保存设定，窗口将最小化到托盘。")
 
         self._set_default_time()
-        self._minimize_to_taskbar()
+        self._minimize_to_tray()
+
+    def _stop_timer(self) -> None:
+        self.target_time = None
+        self.warn_opened = False
+        self.countdown_var.set("")
+        self.status_var.set("已终止当前定时。你可以重新设定新的时间。")
+
+    def _create_tray_image(self):
+        image = Image.new("RGB", (64, 64), "#1f2937")
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((10, 10, 54, 54), fill="#60a5fa")
+        draw.text((24, 22), "Z", fill="white")
+        return image
+
+    def _show_from_tray(self, icon=None, item=None) -> None:
+        self.root.after(0, self._restore_window)
+
+    def _restore_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.root.attributes("-topmost", True)
+        self.root.after(900, lambda: self.root.attributes("-topmost", False))
+        self._stop_tray_icon()
+
+    def _exit_from_tray(self, icon=None, item=None) -> None:
+        self.root.after(0, self._quit_app)
+
+    def _quit_app(self) -> None:
+        self._stop_timer()
+        self._stop_tray_icon()
+        self.root.destroy()
+
+    def _run_tray_icon(self) -> None:
+        menu = pystray.Menu(
+            pystray.MenuItem("打开主界面", self._show_from_tray),
+            pystray.MenuItem("退出", self._exit_from_tray),
+        )
+        self.tray_icon = pystray.Icon("sleep_video_timer", self._create_tray_image(), "睡觉看视频定时助手", menu)
+        self.tray_active = True
+        self.tray_icon.run()
+
+    def _start_tray_icon(self) -> None:
+        if not (PYSTRAY_AVAILABLE and PIL_AVAILABLE):
+            self.root.iconify()
+            self.status_var.set("当前环境缺少 pystray/Pillow，暂时最小化到任务栏。")
+            return
+
+        if self.tray_active:
+            return
+
+        self.tray_thread = threading.Thread(target=self._run_tray_icon, daemon=True)
+        self.tray_thread.start()
+
+    def _stop_tray_icon(self) -> None:
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.tray_active = False
+
+    def _minimize_to_tray(self) -> None:
+        self.root.withdraw()
+        self._start_tray_icon()
 
     def _open_warning_window(self) -> None:
         self.warn_opened = True
-        self.root.deiconify()
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after(1200, lambda: self.root.attributes("-topmost", False))
+        self._restore_window()
         self.status_var.set("30秒后将执行动作。若你还醒着，请重新设定时间。")
-
-    def _minimize_to_taskbar(self) -> None:
-        self.root.iconify()
 
     def _execute_action(self) -> None:
         action = self.action_var.get().strip()
